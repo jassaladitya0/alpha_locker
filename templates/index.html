@@ -1,0 +1,32 @@
+{% extends 'layout.html' %}
+
+{% block content %}
+<section class="hero-section">
+    <div class="hero-content text-center">
+        <h1 class="hero-title text-gradient">Your Documents, Secured & Accessible.</h1>
+        <p class="hero-subtitle">Store your important files safely. Access them anytime, anywhere. <br/>This is a beginner-level Alpha Loker built with Python and Flask.</p>
+        <div class="hero-actions">
+            <a href="{{ url_for('signup') }}" class="action-btn btn-primary-lg">Get Started Now</a>
+            <a href="{{ url_for('login') }}" class="action-btn btn-outline-lg">Login to Locker</a>
+        </div>
+    </div>
+    
+    <div class="features-grid">
+        <div class="feature-card glass-panel">
+            <div class="feature-icon">🔒</div>
+            <h3>Secure Storage</h3>
+            <p>Your documents are stored securely with password hashing and session tracking.</p>
+        </div>
+        <div class="feature-card glass-panel">
+            <div class="feature-icon">📧</div>
+            <h3>Email Verification</h3>
+            <p>We ensure you are the real owner before you can access the locker using OTP.</p>
+        </div>
+        <div class="feature-card glass-panel">
+            <div class="feature-icon">📁</div>
+            <h3>Easy Access</h3>
+            <p>Upload files easily and view or download them neatly arranged on your dashboard.</p>
+        </div>
+    </div>
+</section>
+{% endblock %}
