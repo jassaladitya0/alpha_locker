@@ -6,14 +6,9 @@ import mysql.connector
 from flask import Flask, render_template, request, redirect, url_for, session, flash, send_from_directory
 from werkzeug.utils import secure_filename
 from flask_mail import Mail, Message
-from dotenv import load_dotenv
-
-# Load environment variables from .env file (for local development)
-load_dotenv()
 
 app = Flask(__name__)
-# Secret key for session management. In production, use a secure random string from env variables.
-app.secret_key = os.environ.get('SECRET_KEY', 'default_fallback_secret_key')
+app.secret_key = 'supersecretkey123'
 
 # Configuration for file uploads
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
@@ -26,8 +21,8 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME', 'ENTER_YOUR_GMAIL_HERE@gmail.com')
-app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD', 'ENTER_YOUR_APP_PASSWORD_HERE')
+app.config['MAIL_USERNAME'] = 'coder.hacker.otp@gmail.com'
+app.config['MAIL_PASSWORD'] = 'esar bsyg xtii hulu'
 app.config['MAIL_DEFAULT_SENDER'] = app.config['MAIL_USERNAME']
 mail = Mail(app)
 
@@ -35,12 +30,10 @@ mail = Mail(app)
 def get_db_connection():
     try:
         conn = mysql.connector.connect(
-            host=os.environ.get('DB_HOST', 'localhost'),
-            port=int(os.environ.get('DB_PORT', 3306)),
-            user=os.environ.get('DB_USER', 'root'),
-            password=os.environ.get('DB_PASSWORD', 'root'),
-            database=os.environ.get('DB_NAME', 'digilocker_clone_db'),
-            ssl_disabled=False if os.environ.get('DB_HOST', 'localhost') != 'localhost' else True
+            host='localhost',
+            user='root',
+            password='root',
+            database='digilocker_clone_db'
         )
         return conn
     except Exception as e:
@@ -97,13 +90,16 @@ def signup():
         
         try:
             mail.send(msg)
-            print(f"✅ Real email sent securely to {email}")
+            print(f"Real email sent securely to {email}")
             flash("Check your email for the verification code.", "success")
         except Exception as e:
-            print(f"❌ Error sending email: {e}")
+            print(f"Error sending email: {e}")
             flash("Registered, but failed to send email. Ensure you configured your Gmail and App Password in app.py.", "danger")
             # Fallback for debugging if email fails
             print(f"Fallback. Code is: {veri_code}")
+            # Write to a file for debugging
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'otp.txt'), 'w') as f:
+                f.write(veri_code)
             
         return redirect(url_for('verify'))
         
@@ -173,10 +169,10 @@ def resend():
     
     try:
         mail.send(msg)
-        print(f"✅ New real email sent securely to {email}")
+        print(f"New real email sent securely to {email}")
         flash("A new verification code has been sent to your email.", "success")
     except Exception as e:
-        print(f"❌ Error sending email: {e}")
+        print(f"Error sending email: {e}")
         flash("Failed to send new email. Ensure your Gmail is configured.", "danger")
         
     return redirect(url_for('verify'))
@@ -286,6 +282,27 @@ def download_document(doc_id):
         flash("Document not found or unauthorized.", "danger")
         return redirect(url_for('dashboard'))
 
+@app.route('/view/<int:doc_id>')
+def view_document(doc_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+        
+    user_id = session['user_id']
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    # Only allow viewing if the document belongs to the logged in user
+    cursor.execute("SELECT * FROM documents WHERE id = %s AND user_id = %s", (doc_id, user_id))
+    doc = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    
+    if doc:
+        return send_from_directory(app.config['UPLOAD_FOLDER'], doc['filepath'])
+    else:
+        flash("Document not found or unauthorized.", "danger")
+        return redirect(url_for('dashboard'))
+
 @app.route('/delete_document/<int:doc_id>', methods=['POST'])
 def delete_document(doc_id):
     if 'user_id' not in session:
@@ -301,15 +318,22 @@ def delete_document(doc_id):
     if doc:
         # Delete the actual file from storage
         full_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filepath'])
+        print(f"Attempting to delete file: {full_path}")
         if os.path.exists(full_path):
-            os.remove(full_path)
+            try:
+                os.remove(full_path)
+                print(f"File deleted: {full_path}")
+            except Exception as e:
+                print(f"Error deleting file: {e}")
             
         # Delete from Database
         cursor.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
         conn.commit()
         flash("Document deleted securely.", "success")
+        print(f"Database record deleted for id: {doc_id}")
     else:
         flash("Document not found.", "danger")
+        print(f"Document not found for id: {doc_id} and user_id: {user_id}")
         
     cursor.close()
     conn.close()
@@ -339,13 +363,32 @@ def edit_document(doc_id):
         
         if secure_custom:
             final_name = secure_custom + ext
-            cursor.execute("UPDATE documents SET filename = %s WHERE id = %s", (final_name, doc_id))
+            
+            # Update File on Disk
+            old_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filepath'])
+            user_folder = os.path.join(app.config['UPLOAD_FOLDER'], str(user_id))
+            new_relative_path = f"{str(user_id)}/{final_name}"
+            new_path = os.path.join(app.config['UPLOAD_FOLDER'], new_relative_path)
+            
+            print(f"Renaming file from {old_path} to {new_path}")
+            
+            if os.path.exists(old_path):
+                try:
+                    os.rename(old_path, new_path)
+                    print("File renamed on disk.")
+                except Exception as e:
+                    print(f"Error renaming file on disk: {e}")
+            
+            # Update Database
+            cursor.execute("UPDATE documents SET filename = %s, filepath = %s WHERE id = %s", (final_name, new_relative_path, doc_id))
             conn.commit()
             flash("Document renamed successfully.", "success")
+            print(f"Database record updated for id: {doc_id}")
         else:
             flash("Invalid characters in filename.", "warning")
     else:
         flash("Document not found.", "danger")
+        print(f"Document not found for id: {doc_id} and user_id: {user_id}")
         
     cursor.close()
     conn.close()
@@ -358,5 +401,5 @@ def logout():
     return redirect(url_for('login'))
 
 if __name__ == '__main__':
-    print("🚀 Starting Alpha Loker Server on http://127.0.0.1:5000")
+    print("Starting Alpha Loker Server on http://127.0.0.1:5000")
     app.run(debug=True)

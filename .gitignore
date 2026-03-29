@@ -5,3 +5,5 @@ env/
 .env
 uploads/
 .DS_Store
+server.log
+otp.txt
