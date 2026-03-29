@@ -3,5 +3,4 @@ mysql-connector-python==8.3.0
 bcrypt==4.1.2
 Werkzeug==3.0.1
 Flask-Mail==0.9.1
-gunicorn
-python-dotenv
+python-dotenv==1.0.1
