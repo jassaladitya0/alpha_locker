@@ -2,43 +2,50 @@ import os
 import random
 import string
 import bcrypt
-import mysql.connector
+import datetime
 from flask import Flask, render_template, request, redirect, url_for, session, flash, send_from_directory
 from werkzeug.utils import secure_filename
 from flask_mail import Mail, Message
+from dotenv import load_dotenv
+
+import firebase_admin
+from firebase_admin import credentials, firestore, storage
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = 'supersecretkey123'
-
-# Configuration for file uploads
-UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-# Limit upload size to 16MB
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 
+app.secret_key = os.getenv('SECRET_KEY', 'supersecretkey123')
 
 # Configuration for Flask-Mail
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = 'coder.hacker.otp@gmail.com'
-app.config['MAIL_PASSWORD'] = 'esar bsyg xtii hulu'
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME', 'coder.hacker.otp@gmail.com')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD', 'esar bsyg xtii hulu')
 app.config['MAIL_DEFAULT_SENDER'] = app.config['MAIL_USERNAME']
 mail = Mail(app)
 
-# Function to get Database Connection
-def get_db_connection():
-    try:
-        conn = mysql.connector.connect(
-            host='localhost',
-            user='root',
-            password='root',
-            database='digilocker_clone_db'
-        )
-        return conn
-    except Exception as e:
-        print(f"Database connection error: {e}")
-        return None
+# Limit upload size to 16MB
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 
+
+# Initialize Firebase Admin SDK
+firebase_credentials_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'firebase_credentials.json')
+
+try:
+    cred = credentials.Certificate(firebase_credentials_path)
+    firebase_admin.initialize_app(cred, {
+        'storageBucket': os.getenv('FIREBASE_STORAGE_BUCKET', 'alpha-locker.firebasestorage.app')
+    })
+    print("Firebase Admin HTTP successfully initialized.")
+    
+    # Initialize Firestore and Storage Clients
+    db = firestore.client()
+    bucket = storage.bucket()
+except Exception as e:
+    print(f"Error initializing Firebase Admin SDK. Please ensure firebase_credentials.json is correct: {e}")
+    db = None
+    bucket = None
 
 # Generate a 6-digit random code
 def generate_verification_code():
@@ -60,16 +67,20 @@ def signup():
             flash("Please fill in all fields.", "danger")
             return redirect(url_for('signup'))
             
-        conn = get_db_connection()
-        if not conn:
-            flash("Database connection failed. Please check your setup.", "danger")
+        if not db:
+            flash("Database connection failed. Please check Firebase credentials.", "danger")
             return redirect(url_for('signup'))
             
-        cursor = conn.cursor(dictionary=True)
-        
         # Check if user already exists
-        cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
-        if cursor.fetchone():
+        users_ref = db.collection('users')
+        docs = users_ref.where('email', '==', email).limit(1).stream()
+        
+        user_exists = False
+        for _ in docs:
+            user_exists = True
+            break
+            
+        if user_exists:
             flash("Email already registered. Please log in.", "warning")
             return redirect(url_for('login'))
             
@@ -97,9 +108,6 @@ def signup():
             flash("Registered, but failed to send email. Ensure you configured your Gmail and App Password in app.py.", "danger")
             # Fallback for debugging if email fails
             print(f"Fallback. Code is: {veri_code}")
-            # Write to a file for debugging
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'otp.txt'), 'w') as f:
-                f.write(veri_code)
             
         return redirect(url_for('verify'))
         
@@ -119,20 +127,17 @@ def verify():
         
         if code == temp_signup['otp']:
             # OTP is correct! Now insert them into DB
-            conn = get_db_connection()
-            cursor = conn.cursor(dictionary=True)
             try:
-                cursor.execute(
-                    "INSERT INTO users (email, password, is_verified) VALUES (%s, %s, TRUE)",
-                    (temp_signup['email'], temp_signup['password'])
-                )
-                conn.commit()
-                # Get the new user ID
-                cursor.execute("SELECT id FROM users WHERE email = %s", (temp_signup['email'],))
-                user = cursor.fetchone()
+                # Add a new document in collection "users"
+                new_user_ref = db.collection('users').document()
+                new_user_ref.set({
+                    'email': temp_signup['email'],
+                    'password': temp_signup['password'],
+                    'is_verified': True
+                })
                 
                 # Log them in
-                session['user_id'] = user['id']
+                session['user_id'] = new_user_ref.id
                 session['email'] = temp_signup['email']
                 
                 # Clear temp session
@@ -142,9 +147,6 @@ def verify():
             except Exception as e:
                 flash("Database error during user creation.", "danger")
                 print(e)
-            finally:
-                cursor.close()
-                conn.close()
         else:
             flash("Invalid verification code. Please try again.", "danger")
             
@@ -169,11 +171,10 @@ def resend():
     
     try:
         mail.send(msg)
-        print(f"New real email sent securely to {email}")
         flash("A new verification code has been sent to your email.", "success")
     except Exception as e:
         print(f"Error sending email: {e}")
-        flash("Failed to send new email. Ensure your Gmail is configured.", "danger")
+        flash("Failed to send new email.", "danger")
         
     return redirect(url_for('verify'))
 
@@ -183,21 +184,27 @@ def login():
         email = request.form.get('email')
         password = request.form.get('password')
         
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
-        user = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        if not db:
+            flash("Database connection failed. Please check setup.", "danger")
+            return render_template('login.html')
+            
+        users_ref = db.collection('users')
+        docs = users_ref.where('email', '==', email).limit(1).stream()
         
-        if user:
-            if not user['is_verified']:
+        user_data = None
+        user_id = None
+        for doc in docs:
+            user_data = doc.to_dict()
+            user_id = doc.id
+            
+        if user_data:
+            if not user_data.get('is_verified', False):
                 flash("Please verify your email before logging in.", "warning")
                 return redirect(url_for('verify', email=email))
                 
-            if bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
-                session['user_id'] = user['id']
-                session['email'] = user['email']
+            if bcrypt.checkpw(password.encode('utf-8'), user_data['password'].encode('utf-8')):
+                session['user_id'] = user_id
+                session['email'] = user_data['email']
                 return redirect(url_for('dashboard'))
             else:
                 flash("Invalid email or password.", "danger")
@@ -213,8 +220,6 @@ def dashboard():
         return redirect(url_for('login'))
         
     user_id = session['user_id']
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
     
     # Handle File Upload
     if request.method == 'POST':
@@ -227,119 +232,117 @@ def dashboard():
             flash('No selected file', 'danger')
             return redirect(request.url)
             
-        if file:
+        if file and bucket:
             filename = secure_filename(file.filename)
             custom_name = request.form.get('custom_filename')
             
             if custom_name and custom_name.strip() != '':
                 ext = os.path.splitext(filename)[1]
                 secure_custom = secure_filename(custom_name.strip())
-                if secure_custom: # Ensure it doesn't become empty after stripping illegal chars
+                if secure_custom: 
                     filename = secure_custom + ext
                     
-            # Create a user-specific folder securely
-            user_folder = os.path.join(app.config['UPLOAD_FOLDER'], str(user_id))
-            os.makedirs(user_folder, exist_ok=True)
-            
-            filepath = os.path.join(user_folder, filename)
-            file.save(filepath)
-            
-            # Save file info to database
+            # Set the Firebase Cloud Storage relative path
             relative_path = f"{str(user_id)}/{filename}"
-            cursor.execute(
-                "INSERT INTO documents (user_id, filename, filepath) VALUES (%s, %s, %s)",
-                (user_id, filename, relative_path)
-            )
-            conn.commit()
-            flash("Document uploaded successfully!", "success")
+            blob = bucket.blob(relative_path)
+            
+            # Upload actual file bytes to Firebase Storage
+            blob.upload_from_file(file, content_type=file.content_type)
+            
+            # Save file info to Firestore database
+            db.collection('documents').add({
+                'user_id': user_id,
+                'filename': filename,
+                'filepath': relative_path,
+                'upload_date': firestore.SERVER_TIMESTAMP
+            })
+            flash("Document uploaded successfully to Firebase!", "success")
             
     # Fetch all documents for this user
-    cursor.execute("SELECT * FROM documents WHERE user_id = %s ORDER BY upload_date DESC", (user_id,))
-    documents = cursor.fetchall()
+    docs_ref = db.collection('documents').where('user_id', '==', user_id).order_by('upload_date', direction=firestore.Query.DESCENDING).stream()
+    documents = []
+    for doc in docs_ref:
+        doc_dict = doc.to_dict()
+        doc_dict['id'] = doc.id
+        documents.append(doc_dict)
     
-    cursor.close()
-    conn.close()
     return render_template('dashboard.html', documents=documents, email=session['email'])
 
-@app.route('/download/<int:doc_id>')
+@app.route('/download/<doc_id>')
 def download_document(doc_id):
     if 'user_id' not in session:
         return redirect(url_for('login'))
         
     user_id = session['user_id']
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
     
-    # Only allow downloading if the document belongs to the logged in user
-    cursor.execute("SELECT * FROM documents WHERE id = %s AND user_id = %s", (doc_id, user_id))
-    doc = cursor.fetchone()
-    cursor.close()
-    conn.close()
+    doc_ref = db.collection('documents').document(doc_id)
+    doc = doc_ref.get()
     
-    if doc:
-        return send_from_directory(app.config['UPLOAD_FOLDER'], doc['filepath'], download_name=doc['filename'], as_attachment=True)
+    if doc.exists and doc.to_dict().get('user_id') == user_id:
+        doc_data = doc.to_dict()
+        blob = bucket.blob(doc_data['filepath'])
+        
+        # Generate a Signed URL valid for 1 hour to let the browser download it natively
+        url = blob.generate_signed_url(expiration=datetime.timedelta(hours=1), version="v4", 
+                                       response_disposition=f"attachment; filename=\"{doc_data['filename']}\"")
+        return redirect(url)
     else:
         flash("Document not found or unauthorized.", "danger")
         return redirect(url_for('dashboard'))
 
-@app.route('/view/<int:doc_id>')
+@app.route('/view/<doc_id>')
 def view_document(doc_id):
     if 'user_id' not in session:
         return redirect(url_for('login'))
         
     user_id = session['user_id']
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
     
-    # Only allow viewing if the document belongs to the logged in user
-    cursor.execute("SELECT * FROM documents WHERE id = %s AND user_id = %s", (doc_id, user_id))
-    doc = cursor.fetchone()
-    cursor.close()
-    conn.close()
+    doc_ref = db.collection('documents').document(doc_id)
+    doc = doc_ref.get()
     
-    if doc:
-        return send_from_directory(app.config['UPLOAD_FOLDER'], doc['filepath'])
+    if doc.exists and doc.to_dict().get('user_id') == user_id:
+        doc_data = doc.to_dict()
+        blob = bucket.blob(doc_data['filepath'])
+        
+        # Generate a Signed URL valid for 1 hour to let the browser view it
+        url = blob.generate_signed_url(expiration=datetime.timedelta(hours=1), version="v4", 
+                                       response_disposition="inline")
+        return redirect(url)
     else:
         flash("Document not found or unauthorized.", "danger")
         return redirect(url_for('dashboard'))
 
-@app.route('/delete_document/<int:doc_id>', methods=['POST'])
+@app.route('/delete_document/<doc_id>', methods=['POST'])
 def delete_document(doc_id):
     if 'user_id' not in session:
         return redirect(url_for('login'))
         
     user_id = session['user_id']
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
     
-    cursor.execute("SELECT * FROM documents WHERE id = %s AND user_id = %s", (doc_id, user_id))
-    doc = cursor.fetchone()
+    doc_ref = db.collection('documents').document(doc_id)
+    doc = doc_ref.get()
     
-    if doc:
-        # Delete the actual file from storage
-        full_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filepath'])
-        print(f"Attempting to delete file: {full_path}")
-        if os.path.exists(full_path):
-            try:
-                os.remove(full_path)
-                print(f"File deleted: {full_path}")
-            except Exception as e:
-                print(f"Error deleting file: {e}")
-            
-        # Delete from Database
-        cursor.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
-        conn.commit()
-        flash("Document deleted securely.", "success")
-        print(f"Database record deleted for id: {doc_id}")
-    else:
-        flash("Document not found.", "danger")
-        print(f"Document not found for id: {doc_id} and user_id: {user_id}")
+    if doc.exists and doc.to_dict().get('user_id') == user_id:
+        doc_data = doc.to_dict()
         
-    cursor.close()
-    conn.close()
+        # Delete from Firebase Storage
+        blob = bucket.blob(doc_data['filepath'])
+        if blob.exists():
+            try:
+                blob.delete()
+                print(f"File deleted from storage: {doc_data['filepath']}")
+            except Exception as e:
+                print(f"Error deleting file from Firebase Storage: {e}")
+            
+        # Delete from Firestore
+        doc_ref.delete()
+        flash("Document deleted securely from Firebase.", "success")
+    else:
+        flash("Document not found or unauthorized.", "danger")
+        
     return redirect(url_for('dashboard'))
 
-@app.route('/edit_document/<int:doc_id>', methods=['POST'])
+@app.route('/edit_document/<doc_id>', methods=['POST'])
 def edit_document(doc_id):
     if 'user_id' not in session:
         return redirect(url_for('login'))
@@ -350,48 +353,44 @@ def edit_document(doc_id):
         return redirect(url_for('dashboard'))
         
     user_id = session['user_id']
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
     
-    cursor.execute("SELECT * FROM documents WHERE id = %s AND user_id = %s", (doc_id, user_id))
-    doc = cursor.fetchone()
+    doc_ref = db.collection('documents').document(doc_id)
+    doc = doc_ref.get()
     
-    if doc:
+    if doc.exists and doc.to_dict().get('user_id') == user_id:
+        doc_data = doc.to_dict()
+        
         # Prevent losing the original extension
-        ext = os.path.splitext(doc['filename'])[1]
+        ext = os.path.splitext(doc_data['filename'])[1]
         secure_custom = secure_filename(new_name.strip())
         
         if secure_custom:
             final_name = secure_custom + ext
-            
-            # Update File on Disk
-            old_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filepath'])
-            user_folder = os.path.join(app.config['UPLOAD_FOLDER'], str(user_id))
             new_relative_path = f"{str(user_id)}/{final_name}"
-            new_path = os.path.join(app.config['UPLOAD_FOLDER'], new_relative_path)
             
-            print(f"Renaming file from {old_path} to {new_path}")
-            
-            if os.path.exists(old_path):
-                try:
-                    os.rename(old_path, new_path)
-                    print("File renamed on disk.")
-                except Exception as e:
-                    print(f"Error renaming file on disk: {e}")
-            
-            # Update Database
-            cursor.execute("UPDATE documents SET filename = %s, filepath = %s WHERE id = %s", (final_name, new_relative_path, doc_id))
-            conn.commit()
+            # If the filename actually changed
+            if doc_data['filepath'] != new_relative_path:
+                source_blob = bucket.blob(doc_data['filepath'])
+                
+                if source_blob.exists():
+                    try:
+                        # Rename in Firebase Storage (Copies to new, deletes old)
+                        bucket.rename_blob(source_blob, new_relative_path)
+                        print("File renamed in Firebase Storage.")
+                    except Exception as e:
+                        print(f"Error renaming file in Storage: {e}")
+                        
+            # Update Firestore Database
+            doc_ref.update({
+                'filename': final_name, 
+                'filepath': new_relative_path
+            })
             flash("Document renamed successfully.", "success")
-            print(f"Database record updated for id: {doc_id}")
         else:
             flash("Invalid characters in filename.", "warning")
     else:
         flash("Document not found.", "danger")
-        print(f"Document not found for id: {doc_id} and user_id: {user_id}")
         
-    cursor.close()
-    conn.close()
     return redirect(url_for('dashboard'))
 
 @app.route('/logout')
